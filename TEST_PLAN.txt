@@ -1,0 +1,100 @@
+CS 214 - Project III: A simple shell
+
+AUTHORS
+Vishal Kanala
+Tanisha Bohra
+
+BUILD AND RUN
+make
+./mysh                 interactive when stdin is a terminal
+./mysh commands.txt    batch from a file
+./mysh < commands.txt  batch from standard input
+make test              run the Python 3 integration suite
+make clean             remove the executable
+
+The implementation uses C11 and POSIX APIs. No external C libraries are needed.
+The automated tests require Python 3 and a Unix environment supporting ptys.
+
+DESIGN
+mysh.c contains the reader, tokenizer/parser, wildcard expansion, built-ins,
+redirection handling, pipeline launcher, and the shared main loop. All command
+input is obtained with read(). The reader reads one byte at a time, stopping at
+newline; it cannot consume a future command or terminal input for a child. Lines
+and argument lists grow dynamically, including lines without a final newline.
+
+The parser removes comments and builds one Command per pipeline stage. Each
+Command owns a NULL-terminated argv array and optional input/output filenames.
+Malformed operators, missing operands, empty pipeline stages, repeated input or
+output redirection, and arguments after redirection produce a syntax error.
+Redirections may appear in either order. Operators also work without spaces.
+The assignment permits assuming pipeline stages have no redirection, but this
+implementation also supports it (explicit redirection overrides that pipe end),
+including the exit | echo hello > foo example.
+
+Wildcard expansion scans the directory with opendir/readdir, matches a single
+asterisk in the last pathname component, sorts each group lexicographically,
+and preserves an unmatched token. A pattern whose filename does not begin with
+'.' excludes hidden entries. No quoting, variable expansion, escapes, background
+jobs, or other general-purpose shell syntax is implemented or required.
+
+Standalone built-ins run in the parent with temporarily saved/restored standard
+descriptors. Pipeline built-ins run in children. which uses the same fixed
+executable search as external commands, but does not special-case built-ins.
+External commands use execv after searching /usr/local/bin, /usr/bin, /bin.
+Slash-containing command names are used directly after checking X_OK.
+
+Pipelines are launched completely before waiting. The parent retains only the
+preceding pipe's read end while launching the next stage, and closes all unused
+ends. Children inherit terminal stdin interactively; the first stage instead
+receives /dev/null in batch mode unless input is redirected. All children are
+reaped, and the last stage determines pipeline status. Partial launch failure
+closes descriptors, terminates the children already launched, and reaps them.
+
+Output redirection uses O_TRUNC or O_APPEND with requested creation mode 0640
+(subject to the user's umask). Error messages go to stderr. Nonempty jobs report
+nonzero status or terminating signal in interactive mode only. Valid jobs
+containing exit end the parent after that entire job is complete. The shell
+returns success for command failures, including syntax errors; an unopenable
+command file causes shell failure.
+
+SPECIFICATION INTERPRETATION
+Section 1 repeats 'no argument' in both the interactive detection and the
+always-batch sentence. The examples and isatty requirement make the intended
+rule clear: no argument plus terminal stdin is interactive; a file argument or
+nonterminal stdin is batch. Likewise, explicit INPUT redirection replaces a
+child's stdin; output redirection only replaces stdout.
+
+TEST PLAN
+Run make test. Tests use temporary directories and supply command strings as
+stdin or script files. Generated fixture files are created by the testing code;
+tests/smoke.txt is an additional reusable manual input. The tests assert output,
+errors where relevant, file contents, permissions, shell exit codes, and timeouts.
+
+1. Both batch entry modes: blank lines, comments (including an attached #),
+   ordinary commands, EOF with no newline, and absence of prompts.
+2. Batch stdin isolation: cat receives EOF instead of swallowing the next line.
+3. Built-ins: pwd before/after relative cd, no-argument cd to HOME, missing
+   directories, too many cd arguments, and invalid pwd arguments.
+4. which: fixed search order, multiple arguments, literal executable paths,
+   nonexistent names, and missing arguments; direct /bin/echo execution.
+5. Redirection: create/truncate, append, simultaneous input/output in both
+   orders, content copying, mode 0640 subject to umask, built-in redirection,
+   restoration of parent stdout, missing input, and unopenable output.
+6. Wildcards: multiple tokens, prefix/suffix and zero-character matches,
+   directory-qualified names, hidden-file exclusion, and unmatched patterns.
+7. Pipelines: three stages, built-ins in pipes, cd isolation, a 100,000-line
+   stream exceeding typical pipe capacity, and yes | head to check EOF and
+   SIGPIPE behavior. These cases would expose waiting before launching or
+   retaining a write end that prevents downstream EOF.
+8. Failure recovery: nonexistent command, false, malformed redirections, leading
+   and trailing pipes, then a successful command. The shell still returns 0.
+9. Dynamic input: a 20,000-character argument.
+10. exit with ignored arguments, and exit in a redirected pipeline: the other
+    stage finishes and subsequent commands are not executed.
+11. File-open failure: a nonexistent command file yields nonzero shell status.
+12. Interactive pty: welcome/home prompt, immediate response without another
+    input line, nonzero exit status, a signal-terminated helper, and goodbye.
+
+The suite currently contains 15 test methods. It does not force resource
+exhaustion (pipe/fork/allocation failure) or cover interactive job control,
+which is not required by this assignment.
